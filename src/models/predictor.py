@@ -102,23 +102,24 @@ class Translator(object):
 
         preds, pred_score, gold_score, tgt_str, src =  translation_batch["predictions"],translation_batch["scores"],translation_batch["gold_score"],batch.tgt_str, batch.src
 
-        translations = []
+        translations = [[] for i in range(batch_size)]
         for b in range(batch_size):
-            pred_sents = self.vocab.convert_ids_to_tokens([int(n) for n in preds[b][0]])
-            pred_sents = ' '.join(pred_sents).replace(' ##','')
-            gold_sent = ' '.join(tgt_str[b].split())
-            # translation = Translation(fname[b],src[:, b] if src is not None else None,
-            #                           src_raw, pred_sents,
-            #                           attn[b], pred_score[b], gold_sent,
-            #                           gold_score[b])
-            # src = self.spm.DecodeIds([int(t) for t in translation_batch['batch'].src[0][5] if int(t) != len(self.spm)])
-            raw_src = [self.vocab.ids_to_tokens[int(t)] for t in src[b]][:500]
-            raw_src = ' '.join(raw_src)
-            translation = (pred_sents, gold_sent, raw_src)
-            # translation = (pred_sents[0], gold_sent)
-            translations.append(translation)
+            for bb in range(self.beam_size):
+                pred_sents = self.vocab.convert_ids_to_tokens([int(n) for n in preds[b][bb]])
+                pred_sents = ' '.join(pred_sents).replace(' ##','')
+                gold_sent = ' '.join(tgt_str[b].split())
+                # translation = Translation(fname[b],src[:, b] if src is not None else None,
+                #                           src_raw, pred_sents,
+                #                           attn[b], pred_score[b], gold_sent,
+                #                           gold_score[b])
+                # src = self.spm.DecodeIds([int(t) for t in translation_batch['batch'].src[0][5] if int(t) != len(self.spm)])
+                raw_src = [self.vocab.ids_to_tokens[int(t)] for t in src[b]][:500]
+                raw_src = ' '.join(raw_src)
+                translation = (pred_sents, gold_sent, raw_src)
+                # translation = (pred_sents[0], gold_sent)
+                translations[b].append(translation)
 
-        return translations
+        return translations # [batch_size [beam_size]]
 
     def translate(self,
                   data_iter, step,
@@ -149,33 +150,34 @@ class Translator(object):
                 batch_data = self.translate_batch(batch)
                 translations = self.from_batch(batch_data)
 
-                for trans in translations:
-                    pred, gold, src = trans
-                    pred_str = pred.replace('[unused0]', '').replace('[unused3]', '').replace('[PAD]', '').replace('[unused1]', '').replace(r' +', ' ').replace(' [unused2] ', '<q>').replace('[unused2]', '').strip()
-                    gold_str = gold.strip()
-                    if(self.args.recall_eval):
-                        _pred_str = ''
-                        gap = 1e3
-                        for sent in pred_str.split('<q>'):
-                            can_pred_str = _pred_str+ '<q>'+sent.strip()
-                            can_gap = math.fabs(len(_pred_str.split())-len(gold_str.split()))
-                            # if(can_gap>=gap):
-                            if(len(can_pred_str.split())>=len(gold_str.split())+10):
-                                pred_str = _pred_str
-                                break
-                            else:
-                                gap = can_gap
-                                _pred_str = can_pred_str
+                for _translations in translations:
+                    for trans in _translations:
+                        pred, gold, src = trans
+                        pred_str = pred.replace('[unused0]', '').replace('[unused3]', '').replace('[PAD]', '').replace('[unused1]', '').replace(r' +', ' ').replace(' [unused2] ', '<q>').replace('[unused2]', '').strip()
+                        gold_str = gold.strip()
+                        if(self.args.recall_eval):
+                            _pred_str = ''
+                            gap = 1e3
+                            for sent in pred_str.split('<q>'):
+                                can_pred_str = _pred_str+ '<q>'+sent.strip()
+                                can_gap = math.fabs(len(_pred_str.split())-len(gold_str.split()))
+                                # if(can_gap>=gap):
+                                if(len(can_pred_str.split())>=len(gold_str.split())+10):
+                                    pred_str = _pred_str
+                                    break
+                                else:
+                                    gap = can_gap
+                                    _pred_str = can_pred_str
 
 
 
-                        # pred_str = ' '.join(pred_str.split()[:len(gold_str.split())])
-                    # self.raw_can_out_file.write(' '.join(pred).strip() + '\n')
-                    # self.raw_gold_out_file.write(' '.join(gold).strip() + '\n')
-                    self.can_out_file.write(pred_str + '\n')
-                    self.gold_out_file.write(gold_str + '\n')
-                    self.src_out_file.write(src.strip() + '\n')
-                    ct += 1
+                            # pred_str = ' '.join(pred_str.split()[:len(gold_str.split())])
+                        # self.raw_can_out_file.write(' '.join(pred).strip() + '\n')
+                        # self.raw_gold_out_file.write(' '.join(gold).strip() + '\n')
+                        self.can_out_file.write(pred_str + '\n')
+                        self.gold_out_file.write(gold_str + '\n')
+                        self.src_out_file.write(src.strip() + '\n')
+                        ct += 1
                 self.can_out_file.flush()
                 self.gold_out_file.flush()
                 self.src_out_file.flush()
@@ -257,16 +259,18 @@ class Translator(object):
         # Give full probability to the first beam on the first step.
         topk_log_probs = (
             torch.tensor([0.0] + [float("-inf")] * (beam_size - 1),
-                         device=device).repeat(batch_size))
+                         device=device).repeat(batch_size))  # 1-dimension, shape:[beam_size*batch_size]
 
         # Structure that holds finished hypotheses.
         hypotheses = [[] for _ in range(batch_size)]  # noqa: F812
 
         results = {}
-        results["predictions"] = [[] for _ in range(batch_size)]  # noqa: F812
-        results["scores"] = [[] for _ in range(batch_size)]  # noqa: F812
+        results["predictions"] = [[[] for __ in range(beam_size)] for _ in range(batch_size)]  # noqa: F812
+        results["scores"] = [[[] for __ in range(beam_size)] for _ in range(batch_size)]  # noqa: F812
         results["gold_score"] = [0] * batch_size
         results["batch"] = batch
+
+        beam_output_count = [beam_size for _ in range(batch_size)]
 
         for step in range(max_length):
             decoder_input = alive_seq[:, -1].view(1, -1)
@@ -278,7 +282,7 @@ class Translator(object):
                                                      step=step)
 
             # Generator forward.
-            log_probs = self.generator.forward(dec_out.transpose(0,1).squeeze(0))
+            log_probs = self.generator.forward(dec_out.transpose(0,1).squeeze(0))  # shape:[batch_size*beam_size, vocab_size]
             vocab_size = log_probs.size(-1)
 
             if step < min_length:
@@ -310,15 +314,15 @@ class Translator(object):
                         if fail:
                             curr_scores[i] = -10e20
 
-            curr_scores = curr_scores.reshape(-1, beam_size * vocab_size)
-            topk_scores, topk_ids = curr_scores.topk(beam_size, dim=-1)
+            curr_scores = curr_scores.reshape(-1, beam_size * vocab_size)  # current shape = [batch_size, beam_size*vocab_size]
+            topk_scores, topk_ids = curr_scores.topk(beam_size, dim=-1)  # [batch_size, beam_size]
 
             # Recover log probs.
-            topk_log_probs = topk_scores * length_penalty
+            topk_log_probs = topk_scores * length_penalty  # [batch_size, beam_size]
 
             # Resolve beam origin and true word ids.
-            topk_beam_index = topk_ids.div(vocab_size)
-            topk_ids = topk_ids.fmod(vocab_size)
+            topk_beam_index = topk_ids.div(vocab_size)  # divide
+            topk_ids = topk_ids.fmod(vocab_size)  # mod
 
             # Map beam_index to batch_index in the flat representation.
             batch_index = (
@@ -331,25 +335,32 @@ class Translator(object):
                 [alive_seq.index_select(0, select_indices),
                  topk_ids.view(-1, 1)], -1)
 
-            is_finished = topk_ids.eq(self.end_token)
+            is_finished = topk_ids.eq(self.end_token) # is_finished shape: the same as topk_ids [batch_size, beam_size]
             if step + 1 == max_length:
                 is_finished.fill_(1)
             # End condition is top beam is finished.
-            end_condition = is_finished[:, 0].eq(1)
+            end_condition = is_finished[:, 0].eq(1) # [batch_size, 1]. "0" means the 1st in beam
+            # ys加的
+            _end_condition = torch.full(end_condition.size(), 0).to('cuda')
             # Save finished hypotheses.
             if is_finished.any():
-                predictions = alive_seq.view(-1, beam_size, alive_seq.size(-1))
+                predictions = alive_seq.view(-1, beam_size, alive_seq.size(-1))  # [batch_size, beam_size, seq_len]
                 for i in range(is_finished.size(0)):
                     b = batch_offset[i]
-                    if end_condition[i]:
+                    if beam_output_count[b] <= 0:
                         is_finished[i].fill_(1)
+                        _end_condition = end_condition
                     finished_hyp = is_finished[i].nonzero().view(-1)
                     # Store finished hypotheses for this batch.
                     for j in finished_hyp:
                         hypotheses[b].append((
                             topk_scores[i, j],
                             predictions[i, j, 1:]))
+                        beam_output_count[b] = beam_output_count[b] - 1
+                        topk_log_probs[i, j] = -10e20
                     # If the batch reached the end, save the n_best hypotheses.
+                    '''
+                    # commented
                     if end_condition[i]:
                         best_hyp = sorted(
                             hypotheses[b], key=lambda x: x[0], reverse=True)
@@ -357,7 +368,17 @@ class Translator(object):
 
                         results["scores"][b].append(score)
                         results["predictions"][b].append(pred)
-                non_finished = end_condition.eq(0).nonzero().view(-1)
+                    '''
+                    if beam_output_count[b] <= 0:
+                        best_hyp = sorted(hypotheses[b], key=lambda x: x[0], reverse=True)
+                        # print(batch_offset)
+                        # print(i, b, len(best_hyp))
+                        for k in range(beam_size):
+                            results["scores"][b][k], results["predictions"][b][k] = best_hyp[k]
+
+
+                non_finished = _end_condition.eq(0).nonzero().view(-1)  # 1-dimension
+                # print(non_finished.size())
                 # If all sentences are translated, no need to go further.
                 if len(non_finished) == 0:
                     break
